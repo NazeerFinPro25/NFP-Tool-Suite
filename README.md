@@ -33,6 +33,7 @@ Run the Application:
 
 streamlit run app.py
 
+
 📂 Input File Format
 
 The tool expects an Excel file (.xlsx) with the following columns:
@@ -54,7 +55,7 @@ Nazeer Ahmed Khan Founder, NazeerFinPro
 Email: nazeerfinpro@gmail.com
 
 WhatsApp: +92 333 3126614
-© 2025 NazeerFinPro. All Rights Reserved.
+
 LinkedIn: Nazeer Fin Pro
 
 © 2025 NazeerFinPro. All Rights Reserved.
