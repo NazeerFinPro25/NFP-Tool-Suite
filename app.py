@@ -4,8 +4,9 @@ import datetime
 import random
 import io
 import urllib.parse
+import base64
 from PIL import Image as PILImage
-from openpyxl.styles import Font, Border, Side, Alignment
+from openpyxl.styles import Font, Border, Side, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
 # --- PAGE CONFIGURATION ---
@@ -69,6 +70,11 @@ st.markdown(f"""
         display: flex;
         align-items: center; 
     }}
+    /* Metrics Styling */
+    div[data-testid="stMetricValue"] {{
+        font-size: 24px;
+        color: {BRAND_COLOR};
+    }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -76,7 +82,7 @@ st.markdown(f"""
 SHIFT_STRING = "(0900:1800)"
 STANDARD_HOURS_PER_DAY = 9
 
-# --- HELPER FUNCTIONS (Backend Logic) ---
+# --- HELPER FUNCTIONS (Attendance Backend) ---
 
 def create_natural_time(year, month, base_hour, is_arrival):
     """Generates a natural-looking time string."""
@@ -340,9 +346,407 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
 
     return output
 
+# --- HELPER FUNCTIONS (Invoice Backend) ---
+def num_to_words(n):
+    """Converts a number to words (Western System) for invoice amount."""
+    ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen']
+    tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety']
+
+    def convert(n):
+        if n < 20: return ones[n]
+        if n < 100: return tens[n // 10] + ('' if n % 10 == 0 else ' ' + ones[n % 10])
+        if n < 1000: return ones[n // 100] + ' Hundred' + ('' if n % 100 == 0 else ' and ' + convert(n % 100))
+        if n < 1000000: return convert(n // 1000) + ' Thousand' + ('' if n % 1000 == 0 else ' ' + convert(n % 1000))
+        if n < 1000000000: return convert(n // 1000000) + ' Million' + ('' if n % 1000000 == 0 else ' ' + convert(n % 1000000))
+        return 'Number too large'
+
+    if n == 0: return 'Zero'
+    
+    # Split Integer and Decimal
+    num_str = f"{n:.2f}"
+    integer_part, decimal_part = num_str.split('.')
+    
+    words = convert(int(integer_part))
+    
+    if int(decimal_part) > 0:
+        words += " and " + convert(int(decimal_part)) + " Paisa"
+    
+    return words + " Only"
+
+def generate_html_invoice(input_df, header_info, tax_rate):
+    """Generates a printable HTML string using dynamic header info."""
+    
+    # Group by DC No. to separate invoices
+    grouped = input_df.groupby('DC No.')
+    
+    all_invoices_html = ""
+    
+    for dc_no, group in grouped:
+        # Extract Header Info (Use first row of the group for customer details)
+        header_row = group.iloc[0]
+        customer_name = header_row.get('Customer Name', '')
+        bill_address = header_row.get('Bill To Address', '')
+        customer_ntn = header_row.get('Customer NTN', '')
+        invoice_no = header_row.get('Invoice No.', '')
+        
+        # Format date safely
+        raw_date = header_row.get('Invoice Date', '')
+        try:
+            invoice_date = pd.to_datetime(raw_date).strftime('%d-%b-%Y')
+        except:
+            invoice_date = str(raw_date)
+            
+        payment_terms = header_row.get('Credit Terms', 'Cash')
+        
+        # Calculations
+        sub_total = group['Total Value (PKR)'].sum()
+        # tax_rate is now a percentage (e.g., 18.0)
+        tax_amount = sub_total * (tax_rate / 100)
+        grand_total = sub_total + tax_amount
+        amount_in_words = num_to_words(grand_total)
+        
+        # Generate Rows HTML
+        rows_html = ""
+        for idx, row in group.iterrows():
+            u_price = f"{row['Unit Price (PKR)']:,.2f}"
+            t_value = f"{row['Total Value (PKR)']:,.2f}"
+            
+            rows_html += f"""
+            <tr class="bg-white">
+                <td class="p-1 text-center">{idx + 1}</td>
+                <td class="p-1">{row['H.S Code']}</td>
+                <td class="p-1 wrap-text">{row['Item Description']}</td>
+                <td class="p-1">Weaving</td> 
+                <td class="p-1">JOB-{random.randint(1000,9999)}</td>
+                <td class="p-1">{row['DC No.']}</td>
+                <td class="p-1">{row['UOM']}</td>
+                <td class="p-1 text-center">{row['Qty']}</td>
+                <td class="p-1 text-right">{u_price}</td>
+                <td class="p-1 text-right">{t_value}</td>
+            </tr>
+            """
+            
+        for _ in range(max(0, 8 - len(group))):
+             rows_html += '<tr class="bg-white"><td class="p-2 text-center">&nbsp;</td><td></td><td class="wrap-text"></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>'
+
+        # Dynamic Header HTML using user input
+        invoice_html = f"""
+        <div class="printable-container max-w-6xl mx-auto bg-white p-6 md:p-8 rounded-lg shadow-lg border-2 border-gray-700 dark-border mb-8" style="page-break-after: always;">
+            
+            <!-- Header -->
+            <header class="flex justify-between items-start pb-4 border-b-2 border-gray-700 dark-border">
+                <div>
+                    <h1 class="text-2xl md:text-3xl font-bold text-gray-800">{header_info['company_name']}</h1>
+                    <p class="text-sm text-gray-500">{header_info['address']}</p>
+                    <p class="text-sm text-gray-500">Phones: {header_info['phone']}</p>
+                    <p class="text-sm text-gray-500">E-mail: {header_info['email']} | Website: {header_info['web']}</p>
+                    <p class="text-sm text-gray-500 font-semibold mt-1">NTN: {header_info['ntn']}</p>
+                </div>
+                <div class="text-right">
+                    <h2 class="text-2xl md:text-3xl font-semibold text-gray-700">SALES TAX INVOICE</h2>
+                    <div class="mt-2 grid grid-cols-2 gap-2 text-left">
+                        <label class="block text-xs font-medium text-gray-500 p-1">Invoice No.</label>
+                        <input type="text" value="{invoice_no}" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border" readonly>
+                        
+                        <label class="block text-xs font-medium text-gray-500 p-1">Invoice Date</label>
+                        <input type="text" value="{invoice_date}" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                        
+                        <label class="block text-xs font-medium text-gray-500 p-1">Payment Terms</label>
+                        <input type="text" value="{payment_terms}" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+
+                        <label class="block text-xs font-medium text-gray-500 p-1">Customer PO</label>
+                        <input type="text" value="PO-REF-XX" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                    </div>
+                </div>
+            </header>
+
+            <div class="main-content">
+                <!-- Customer Section -->
+                <section class="grid grid-cols-2 gap-6 mt-6 section-spacing">
+                    <div class="border border-gray-700 rounded-md p-3 dark-border">
+                        <h3 class="text-sm font-semibold text-white mb-2 bg-gray-700 p-1 -m-3 border-b border-gray-700 dark-bg dark-border">BILL TO</h3>
+                        <div class="mt-3">
+                            <label class="block text-xs font-medium text-gray-500">Customer Name</label>
+                            <input type="text" value="{customer_name}" class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                        </div>
+                        <div class="mt-2">
+                            <label class="block text-xs font-medium text-gray-500">Address</label>
+                            <textarea class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border" rows="2">{bill_address}</textarea>
+                        </div>
+                        <div class="mt-2 grid grid-cols-2 gap-2">
+                             <div>
+                                <label class="block text-xs font-medium text-gray-500">NTN</label>
+                                <input type="text" value="{customer_ntn}" class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                             </div>
+                             <div>
+                                <label class="block text-xs font-medium text-gray-500">STRN</label>
+                                <input type="text" value="" class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                             </div>
+                        </div>
+                    </div>
+                    <div class="border border-gray-700 rounded-md p-3 dark-border">
+                        <h3 class="text-sm font-semibold text-white mb-2 bg-gray-700 p-1 -m-3 border-b border-gray-700 dark-bg dark-border">SHIP TO</h3>
+                        <div class="mt-3">
+                            <p class="text-sm font-semibold text-gray-800">{customer_name}</p>
+                            <p class="text-sm text-gray-600">{bill_address}</p>
+                        </div>
+                    </div>
+                </section>
+    
+                <!-- Items Table -->
+                <section class="mt-6 table-container section-spacing">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-2">Item Details</h3>
+                    <table class="w-full text-sm text-left text-gray-500 printable-table">
+                        <thead class="text-xs text-white uppercase bg-gray-700 dark-bg" style="-webkit-print-color-adjust: exact;">
+                            <tr>
+                                <th class="p-2 text-center" style="width: 3%;">Sr.</th>
+                                <th class="p-2" style="width: 8%;">H.S Code</th>
+                                <th class="p-2 wrap-text" style="width: 25%;">Item Description</th>
+                                <th class="p-2" style="width: 10%;">Cost Center</th>
+                                <th class="p-2" style="width: 10%;">Job No.</th>
+                                <th class="p-2" style="width: 10%;">DC No.</th>
+                                <th class="p-2" style="width: 4%;">UOM</th>
+                                <th class="p-2 text-center" style="width: 5%;">Qty</th>
+                                <th class="p-2 text-right" style="width: 10%;">Unit Price</th>
+                                <th class="p-2 text-right" style="width: 15%;">Total Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows_html}
+                        </tbody>
+                    </table>
+                </section>
+                
+                <!-- Totals -->
+                <section class="grid grid-cols-2 gap-6 mt-6 section-spacing">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Amount in Words (PKR)</label>
+                        <textarea class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border" rows="2" readonly>{amount_in_words}</textarea>
+                    </div>
+                    <div class="space-y-2">
+                        <div class="flex justify-between items-center bg-gray-700 text-white p-2 rounded-md border border-gray-700 dark-bg dark-border">
+                            <span class="text-sm font-semibold">Sub-Total:</span>
+                            <span class="text-sm font-semibold">{sub_total:,.2f}</span>
+                        </div>
+                        <div class="flex justify-between items-center p-2">
+                            <div class="text-sm font-medium text-gray-600">
+                                Sales Tax ({tax_rate}%):
+                            </div>
+                            <span class="text-sm text-gray-800">{tax_amount:,.2f}</span>
+                        </div>
+                        <div class="flex justify-between items-center bg-gray-700 text-white p-3 rounded-md border border-gray-700 dark-bg dark-border">
+                            <span class="text-base font-bold">Grand Total:</span>
+                            <span class="text-base font-bold">{grand_total:,.2f}</span>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Footer Signature -->
+            <footer class="mt-8">
+                <div class="grid grid-cols-2 gap-8">
+                    <div></div>
+                    <div class="text-center">
+                        <p class="signature-line pt-2 text-sm font-semibold text-gray-700">For {header_info['company_name']}</p>
+                        <p class="text-xs text-gray-500">(Authorized Signatory)</p>
+                    </div>
+                </div>
+            </footer>
+        </div>
+        """
+        all_invoices_html += invoice_html
+
+    # --- Final HTML Structure ---
+    full_html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Sales Tax Invoices</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            body {{ background-color: #f9fafb; font-family: Calibri, sans-serif; }}
+            @media print {{
+                @page {{ size: A4 portrait; margin: 0.1cm; margin-bottom: 0.5cm; }}
+                html, body {{ background-color: #fff; font-size: 9pt; }}
+                .no-print {{ display: none; }}
+                input, textarea, select {{ border: none !important; resize: none; }}
+                .printable-table th {{ background-color: #4A5568 !important; color: white !important; -webkit-print-color-adjust: exact; }}
+            }}
+            .signature-line {{ border-top: 1px solid #4A5568; margin-top: 2.5rem; }}
+            .printable-table, .printable-table th, .printable-table td {{ border: 1px solid #4A5568; border-collapse: collapse; }}
+        </style>
+    </head>
+    <body class="p-4 md:p-8">
+        {all_invoices_html}
+        <div class="fixed bottom-4 right-4 no-print">
+            <button onclick="window.print()" class="px-6 py-3 bg-blue-600 text-white font-bold rounded-full shadow-lg hover:bg-blue-700 transition">
+                🖨️ Print Invoices
+            </button>
+        </div>
+    </body>
+    </html>
+    """
+    return full_html
+
+def generate_excel_invoice(input_df, header_info, tax_rate):
+    """Generates an Excel file with multiple invoices on one sheet separated by page breaks."""
+    output = io.BytesIO()
+    grouped = input_df.groupby('DC No.')
+    
+    # Styles
+    header_font = Font(name='Calibri', size=14, bold=True)
+    sub_header_font = Font(name='Calibri', size=10)
+    table_header_font = Font(name='Calibri', size=10, bold=True, color="FFFFFF")
+    fill_dark = PatternFill(start_color="4A5568", end_color="4A5568", fill_type="solid")
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        ws = writer.book.create_sheet("Invoices")
+        # Set column widths approx
+        ws.column_dimensions['A'].width = 5
+        ws.column_dimensions['B'].width = 10
+        ws.column_dimensions['C'].width = 30
+        ws.column_dimensions['D'].width = 10
+        ws.column_dimensions['E'].width = 10
+        ws.column_dimensions['F'].width = 10
+        ws.column_dimensions['G'].width = 8
+        ws.column_dimensions['H'].width = 8
+        ws.column_dimensions['I'].width = 12
+        ws.column_dimensions['J'].width = 15
+        
+        current_row = 1
+        
+        for dc_no, group in grouped:
+            # Extract Info
+            header_row = group.iloc[0]
+            invoice_no = header_row.get('Invoice No.', '')
+            # Safe Date
+            raw_date = header_row.get('Invoice Date', '')
+            invoice_date = raw_date if isinstance(raw_date, str) else raw_date.strftime('%d-%b-%Y')
+            
+            # Header Section
+            ws.cell(row=current_row, column=1, value=header_info['company_name']).font = header_font
+            ws.cell(row=current_row, column=8, value="SALES TAX INVOICE").font = header_font
+            current_row += 1
+            
+            ws.cell(row=current_row, column=1, value=header_info['address']).font = sub_header_font
+            ws.cell(row=current_row, column=8, value=f"Invoice No: {invoice_no}").font = sub_header_font
+            current_row += 1
+            
+            ws.cell(row=current_row, column=1, value=f"Phone: {header_info['phone']}").font = sub_header_font
+            ws.cell(row=current_row, column=8, value=f"Date: {invoice_date}").font = sub_header_font
+            current_row += 1
+            
+            ws.cell(row=current_row, column=1, value=f"NTN: {header_info['ntn']}").font = sub_header_font
+            current_row += 2 # Spacer
+            
+            # Bill To Section
+            ws.cell(row=current_row, column=1, value="BILL TO").font = Font(bold=True)
+            ws.cell(row=current_row, column=2, value=header_row.get('Customer Name', ''))
+            current_row += 1
+            ws.cell(row=current_row, column=1, value="Address").font = Font(bold=True)
+            ws.cell(row=current_row, column=2, value=header_row.get('Bill To Address', ''))
+            current_row += 1
+            ws.cell(row=current_row, column=1, value="NTN").font = Font(bold=True)
+            ws.cell(row=current_row, column=2, value=header_row.get('Customer NTN', ''))
+            current_row += 2
+            
+            # Table Headers
+            headers = ["Sr.", "H.S Code", "Description", "Cost Center", "Job No", "DC No", "UOM", "Qty", "Unit Price", "Total"]
+            for col_idx, h in enumerate(headers, 1):
+                c = ws.cell(row=current_row, column=col_idx, value=h)
+                c.font = table_header_font
+                c.fill = fill_dark
+                c.alignment = Alignment(horizontal='center')
+            current_row += 1
+            
+            # Items
+            sub_total = 0
+            for idx, row in group.iterrows():
+                ws.cell(row=current_row, column=1, value=idx+1).border = thin_border
+                ws.cell(row=current_row, column=2, value=row['H.S Code']).border = thin_border
+                ws.cell(row=current_row, column=3, value=row['Item Description']).border = thin_border
+                ws.cell(row=current_row, column=4, value="Weaving").border = thin_border
+                ws.cell(row=current_row, column=5, value="JOB-XXXX").border = thin_border
+                ws.cell(row=current_row, column=6, value=row['DC No.']).border = thin_border
+                ws.cell(row=current_row, column=7, value=row['UOM']).border = thin_border
+                ws.cell(row=current_row, column=8, value=row['Qty']).border = thin_border
+                ws.cell(row=current_row, column=9, value=row['Unit Price (PKR)']).border = thin_border
+                total_val = row['Total Value (PKR)']
+                ws.cell(row=current_row, column=10, value=total_val).border = thin_border
+                sub_total += total_val
+                current_row += 1
+                
+            # Totals
+            tax_amount = sub_total * (tax_rate / 100)
+            grand_total = sub_total + tax_amount
+            
+            current_row += 1
+            ws.cell(row=current_row, column=9, value="Sub-Total").font = Font(bold=True)
+            ws.cell(row=current_row, column=10, value=sub_total).font = Font(bold=True)
+            current_row += 1
+            ws.cell(row=current_row, column=9, value=f"GST ({tax_rate}%)").font = Font(bold=True)
+            ws.cell(row=current_row, column=10, value=tax_amount).font = Font(bold=True)
+            current_row += 1
+            ws.cell(row=current_row, column=9, value="Grand Total").font = Font(bold=True)
+            ws.cell(row=current_row, column=10, value=grand_total).font = Font(bold=True)
+            
+            # Amount in Words
+            current_row += 1
+            ws.cell(row=current_row, column=1, value="Amount in Words: " + num_to_words(grand_total)).font = Font(italic=True)
+            
+            # Page Break Logic
+            # (OpenPyXL doesn't support explicit 'insert page break' easily in one sheet flow same as HTML/PDF logic
+            # but we can simulate spacing for printing or just list them sequentially)
+            current_row += 4 # Gap before next invoice
+            
+        # Remove default sheet
+        if 'Sheet' in writer.book.sheetnames:
+            writer.book.remove(writer.book['Sheet'])
+            
+    return output
+
+# --- FBR TAX LOGIC 2025-26 ---
+def calculate_fbr_tax(monthly_gross_salary):
+    """
+    Calculates Pakistan FBR Income Tax (Salaried) for Tax Year 2025-2026.
+    Slabs logic based on Annual Taxable Income.
+    """
+    annual_income = monthly_gross_salary * 12
+    annual_tax = 0
+
+    # FBR Slabs 2025-2026 (Salaried)
+    # 1. Up to 600,000 -> 0%
+    if annual_income <= 600000:
+        annual_tax = 0
+    
+    # 2. 600,001 - 1,200,000 -> 1% of excess over 600,000
+    elif annual_income <= 1200000:
+        annual_tax = (annual_income - 600000) * 0.01
+        
+    # 3. 1,200,001 - 2,200,000 -> 6,000 + 11% of excess over 1,200,000
+    elif annual_income <= 2200000:
+        annual_tax = 6000 + (annual_income - 1200000) * 0.11
+        
+    # 4. 2,200,001 - 3,200,000 -> 116,000 + 23% of excess over 2,200,000
+    elif annual_income <= 3200000:
+        annual_tax = 116000 + (annual_income - 2200000) * 0.23
+        
+    # 5. 3,200,001 - 4,100,000 -> 346,000 + 30% of excess over 3,200,000
+    elif annual_income <= 4100000:
+        annual_tax = 346000 + (annual_income - 3200000) * 0.30
+        
+    # 6. Above 4,100,000 -> 616,000 + 35% of excess over 4,100,000
+    else:
+        annual_tax = 616000 + (annual_income - 4100000) * 0.35
+
+    monthly_tax = annual_tax / 12
+    return annual_income, annual_tax, monthly_tax
+
 # --- SIDEBAR: BRANDING & NAVIGATION ---
 with st.sidebar:
-    # 1. LOGO & HERO IMAGE (Kept the office image here as requested)
     try:
         logo = PILImage.open("nfp_office.jpg") 
         st.image(logo, use_container_width=True)
@@ -357,7 +761,6 @@ with st.sidebar:
     st.caption("Professional Finance Consultancy")
     st.write("---")
     
-    # Modified Layout: Image visible outside/before the expander on the right
     col_about_label, col_about_img = st.columns([3, 1])
     
     with col_about_label:
@@ -385,63 +788,8 @@ with st.sidebar:
     
     st.write("---")
 
-    # APP SETTINGS
-    st.header("⚙️ Generator Settings")
-    
-    # --- COMPANY NAME INPUT ---
-    st.info("👇 Enter Company Details")
-    company_name = st.text_input("Company Name", value="ABC COMPANY")
-    
-    target_date = st.date_input("Select Month & Year", datetime.date(2025, 8, 1))
-    selected_month = target_date.month
-    selected_year = target_date.year
-    
-    st.subheader("🎉 Gazetted Holidays")
-    
-    if 'holidays' not in st.session_state:
-        st.session_state.holidays = [
-            {"date": datetime.date(selected_year, 8, 14), "name": "Independence Day"}
-        ]
-    
-    with st.form("add_holiday"):
-        default_date_val = datetime.date(selected_year, selected_month, 1)
-        h_date = st.date_input("Holiday Date", value=default_date_val)
-        h_name = st.text_input("Holiday Name", placeholder="e.g. Eid, Labor Day")
-        
-        submitted = st.form_submit_button("Add Holiday")
-        if submitted:
-            if h_name:
-                st.session_state.holidays.append({"date": h_date, "name": h_name})
-                st.success(f"Added: {h_name} on {h_date}")
-            else:
-                st.error("Please enter a name for the holiday.")
-            
-    holidays_dict = {}
-    current_month_holidays = []
-
-    if st.session_state.holidays:
-        for h in st.session_state.holidays:
-            if h['date'].year == selected_year and h['date'].month == selected_month:
-                current_month_holidays.append(h)
-                if h['date'] in holidays_dict:
-                    holidays_dict[h['date']] += f" / {h['name']}"
-                else:
-                    holidays_dict[h['date']] = h['name']
-    
-    if current_month_holidays:
-        st.write("**Active Holidays for Report:**")
-        display_data = [{"Date": h['date'].strftime('%d-%b-%Y'), "Name": h['name']} for h in current_month_holidays]
-        st.dataframe(display_data, hide_index=True, use_container_width=True)
-    else:
-        st.info("No holidays added for this specific month.")
-
-    if st.button("Clear All Holidays"):
-        st.session_state.holidays = []
-        st.rerun()
-
 # --- MAIN CONTENT ---
 
-# --- HEADER SECTION ---
 col_title, col_logo = st.columns([5, 1])
 
 with col_title:
@@ -450,21 +798,76 @@ with col_title:
 
 with col_logo:
     try:
-        # --- RESTORED ORIGINAL LOGO HERE ---
-        header_logo = PILImage.open("logo.jpg")
+        header_logo = PILImage.open("image_567787.jpg")
         st.image(header_logo, width=150) 
     except:
         pass 
 
 
 # Tabs for sections
-tab1, tab2, tab3 = st.tabs(["🏢 Attendance Generator", "📝 Consultancy Blog", "📞 Contact NFP"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏢 Attendance Generator", "🧾 Invoice Maker", "🧮 Payroll Calculator", "📝 Consultancy Blog", "📞 Contact NFP"])
 
 # --- TAB 1: THE GENERATOR APP ---
 with tab1:
     st.subheader("Auto-Generate Attendance Sheets")
     st.info("Upload your employee data file (`data.xlsx`) to generate payroll-ready Excel sheets with natural time variations.")
     
+    # --- CUSTOMIZE ATTENDANCE SETTINGS ---
+    with st.expander("⚙️ Customize Report Header & Settings", expanded=True):
+        col_gen_1, col_gen_2 = st.columns(2)
+        with col_gen_1:
+            company_name = st.text_input("Company Name", value="ABC COMPANY", key="att_company_name")
+            target_date = st.date_input("Select Month & Year", datetime.date(2025, 8, 1), key="att_target_date")
+            selected_month = target_date.month
+            selected_year = target_date.year
+        
+        with col_gen_2:
+            st.write("**Gazetted Holidays**")
+            if 'holidays' not in st.session_state:
+                st.session_state.holidays = [
+                    {"date": datetime.date(selected_year, 8, 14), "name": "Independence Day"}
+                ]
+            
+            # Holiday Inputs
+            col_h1, col_h2 = st.columns(2)
+            with col_h1:
+                default_date_val = datetime.date(selected_year, selected_month, 1)
+                h_date = st.date_input("Holiday Date", value=default_date_val, label_visibility="collapsed")
+            with col_h2:
+                h_name = st.text_input("Holiday Name", placeholder="Name", label_visibility="collapsed")
+                
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                if st.button("Add Holiday", key="add_hol_btn"):
+                    if h_name:
+                        st.session_state.holidays.append({"date": h_date, "name": h_name})
+                        st.success(f"Added: {h_name}")
+                    else:
+                        st.error("Enter Name")
+            with col_b2:
+                if st.button("Clear Holidays", key="clear_hol_btn"):
+                    st.session_state.holidays = []
+                    st.rerun()
+
+            # Show Active Holidays
+            holidays_dict = {}
+            current_month_holidays = []
+            if st.session_state.holidays:
+                for h in st.session_state.holidays:
+                    if h['date'].year == selected_year and h['date'].month == selected_month:
+                        current_month_holidays.append(h)
+                        if h['date'] in holidays_dict:
+                            holidays_dict[h['date']] += f" / {h['name']}"
+                        else:
+                            holidays_dict[h['date']] = h['name']
+            
+            if current_month_holidays:
+                st.caption("Active Holidays:")
+                for h in current_month_holidays:
+                    st.caption(f"- {h['date'].strftime('%d-%b')}: {h['name']}")
+            else:
+                st.caption("No holidays for this month.")
+
     uploaded_file = st.file_uploader("Upload Input File", type=['xlsx'])
 
     if uploaded_file is not None:
@@ -489,8 +892,105 @@ with tab1:
         except Exception as e:
             st.error(f"Error: {e}")
 
-# --- TAB 2: BLOG PLACEHOLDER ---
+# --- TAB 2: GST INVOICE MAKER ---
 with tab2:
+    st.subheader("🧾 Invoice Maker")
+    st.info("Upload your Sales Register (`sales_register.xlsx`) to generate bulk GST invoices ready for printing.")
+    
+    # --- CUSTOMIZE INVOICE SETTINGS ---
+    with st.expander("⚙️ Customize Company Header & Tax", expanded=True):
+        col_inv_1, col_inv_2 = st.columns(2)
+        with col_inv_1:
+            inv_company_name = st.text_input("Company Name", value="NazeerFinPro-NFP")
+            inv_address = st.text_area("Company Address", value="Plot No. 123, S.I.T.E, Karachi, Pakistan.")
+            inv_phone = st.text_input("Contact No.", value="00923333126614")
+        with col_inv_2:
+            inv_email = st.text_input("Email", value="nfp@gmail.com")
+            inv_web = st.text_input("Web Address", value="www.nfp.com")
+            inv_ntn = st.text_input("Company NTN", value="N123456-7")
+            inv_tax_rate = st.number_input("Sales Tax Rate (%)", value=18.0, step=1.0)
+            
+    header_info = {
+        "company_name": inv_company_name,
+        "address": inv_address,
+        "phone": inv_phone,
+        "email": inv_email,
+        "web": inv_web,
+        "ntn": inv_ntn
+    }
+    
+    invoice_file = st.file_uploader("Upload Sales Register", type=['xlsx'], key="invoice_uploader")
+    
+    if invoice_file is not None:
+        try:
+            inv_df = pd.read_excel(invoice_file)
+            st.success("Sales Register Loaded!")
+            
+            with st.expander("Preview Sales Data"):
+                st.dataframe(inv_df.head())
+                
+            if st.button("🖨️ Generate Printable Invoices", type="primary"):
+                with st.spinner("Generating Invoices..."):
+                    # Generate HTML
+                    html_content = generate_html_invoice(inv_df, header_info, inv_tax_rate)
+                    
+                    # Generate Excel
+                    excel_inv_data = generate_excel_invoice(inv_df, header_info, inv_tax_rate)
+                    
+                    col_d1, col_d2 = st.columns(2)
+                    with col_d1:
+                        # Offer HTML Download
+                        st.download_button(
+                            label="📥 Download PDF/HTML Invoices",
+                            data=html_content,
+                            file_name="GST_Invoices_Printable.html",
+                            mime="text/html"
+                        )
+                    with col_d2:
+                        # Offer Excel Download
+                        st.download_button(
+                            label="📥 Download Excel Invoices",
+                            data=excel_inv_data.getvalue(),
+                            file_name="GST_Invoices.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    
+                    # Show Preview
+                    st.markdown("### Preview (First Invoice)")
+                    st.components.v1.html(html_content, height=800, scrolling=True)
+                    
+        except Exception as e:
+            st.error(f"Error processing file: {e}")
+
+# --- TAB 3: FBR TAX CALCULATOR ---
+with tab3:
+    st.subheader("🇵🇰 Pakistan Salary Tax Calculator (2025-2026)")
+    st.markdown("Accurate tax calculation based on **FBR Slabs for Salaried Individuals (Tax Year 2025-26)**.")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        monthly_salary = st.number_input("Enter Monthly Gross Salary (PKR)", value=100000, step=5000, format="%d")
+    
+    # Calculate
+    annual_inc, annual_tax, monthly_tax = calculate_fbr_tax(monthly_salary)
+    net_salary = monthly_salary - monthly_tax
+    
+    st.divider()
+    
+    # Display Results
+    res_col1, res_col2, res_col3 = st.columns(3)
+    
+    with res_col1:
+        st.metric(label="Annual Tax", value=f"{annual_tax:,.0f}")
+    with res_col2:
+        st.metric(label="Monthly Tax Deduction", value=f"{monthly_tax:,.0f}")
+    with res_col3:
+        st.metric(label="Net Monthly Salary", value=f"{net_salary:,.0f}")
+
+    st.caption("Note: Calculations are based on provided FBR Salary Slabs for Tax Year 2025-26. Rebates or adjustments are not included.")
+
+# --- TAB 4: BLOG PLACEHOLDER ---
+with tab4:
     st.subheader("📰 NFP Financial Insights")
     st.write("Welcome to the NazeerFinPro blog. Here we share insights on financial management and automation.")
     
@@ -513,15 +1013,14 @@ with tab2:
         st.write("Why your stakeholders ignore your spreadsheets and how to fix it with dashboards...")
         st.button("Read More", key="b2")
 
-# --- TAB 3: CONTACT ---
-with tab3:
+# --- TAB 5: CONTACT ---
+with tab5:
     st.subheader("🤝 Work with NazeerFinPro")
     st.write("Ready to automate your financial processes? Let's connect.")
     
     c1, c2 = st.columns([1, 2])
     with c1:
         try:
-            # --- UPDATED IMAGE HERE ---
             profile = PILImage.open("Nazeer Fin Pro - NFP.jpg") 
             st.image(profile, width=200)
         except:
