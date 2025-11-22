@@ -423,12 +423,12 @@ def generate_html_invoice(input_df, header_info, tax_rate):
         for _ in range(max(0, 8 - len(group))):
              rows_html += '<tr class="bg-white"><td class="p-2 text-center">&nbsp;</td><td></td><td class="wrap-text"></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>'
 
-        # --- UPDATED HEADER CSS: Removed border from header section ---
+        # --- UPDATED CSS: Force black text and clear, solid black borders for print ---
         invoice_html = f"""
         <div class="printable-container max-w-6xl mx-auto bg-white p-6 md:p-8 rounded-lg shadow-lg border-2 border-black mb-8" style="page-break-after: always;">
             
-            <!-- Header (NO BORDER HERE) -->
-            <header class="flex justify-between items-start pb-4">
+            <!-- Header -->
+            <header class="flex justify-between items-start pb-4 border-b-2 border-black">
                 <div>
                     <h1 class="text-2xl md:text-3xl font-bold text-gray-800">{header_info['company_name']}</h1>
                     <p class="text-sm text-gray-500">{header_info['address']}</p>
@@ -840,6 +840,18 @@ with tab1:
     st.subheader("Auto-Generate Attendance Sheets")
     st.info("Upload your employee data file (`data.xlsx`) to generate payroll-ready Excel sheets with natural time variations.")
     
+    # --- DOWNLOAD SAMPLE BUTTON ---
+    if os.path.exists("data.xlsx"):
+        with open("data.xlsx", "rb") as template_file:
+            st.download_button(
+                label="📥 Download Sample Template",
+                data=template_file,
+                file_name="data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    else:
+        st.warning("⚠️ 'data.xlsx' template not found in repository.")
+    
     # --- CUSTOMIZE ATTENDANCE SETTINGS ---
     with st.expander("⚙️ Customize Report Header & Settings", expanded=True):
         col_gen_1, col_gen_2 = st.columns(2)
@@ -925,6 +937,18 @@ with tab2:
     st.subheader("🧾 Invoice Maker")
     st.info("Upload your Sales Register (`sales_register.xlsx`) to generate bulk GST invoices ready for printing.")
     
+    # --- DOWNLOAD SAMPLE BUTTON ---
+    if os.path.exists("sales_register.xlsx"):
+        with open("sales_register.xlsx", "rb") as template_file:
+            st.download_button(
+                label="📥 Download Sales Register Template",
+                data=template_file,
+                file_name="sales_register.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    else:
+        st.warning("⚠️ 'sales_register.xlsx' template not found in repository.")
+
     # --- CUSTOMIZE INVOICE SETTINGS ---
     with st.expander("⚙️ Customize Company Header & Tax", expanded=True):
         col_inv_1, col_inv_2 = st.columns(2)
