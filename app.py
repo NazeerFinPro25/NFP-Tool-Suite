@@ -5,6 +5,7 @@ import random
 import io
 import urllib.parse
 import base64
+import os
 from PIL import Image as PILImage
 from openpyxl.styles import Font, Border, Side, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
@@ -376,20 +377,16 @@ def num_to_words(n):
 def generate_html_invoice(input_df, header_info, tax_rate):
     """Generates a printable HTML string using dynamic header info."""
     
-    # Group by DC No. to separate invoices
     grouped = input_df.groupby('DC No.')
-    
     all_invoices_html = ""
     
     for dc_no, group in grouped:
-        # Extract Header Info (Use first row of the group for customer details)
         header_row = group.iloc[0]
         customer_name = header_row.get('Customer Name', '')
         bill_address = header_row.get('Bill To Address', '')
         customer_ntn = header_row.get('Customer NTN', '')
         invoice_no = header_row.get('Invoice No.', '')
         
-        # Format date safely
         raw_date = header_row.get('Invoice Date', '')
         try:
             invoice_date = pd.to_datetime(raw_date).strftime('%d-%b-%Y')
@@ -398,14 +395,11 @@ def generate_html_invoice(input_df, header_info, tax_rate):
             
         payment_terms = header_row.get('Credit Terms', 'Cash')
         
-        # Calculations
         sub_total = group['Total Value (PKR)'].sum()
-        # tax_rate is now a percentage (e.g., 18.0)
         tax_amount = sub_total * (tax_rate / 100)
         grand_total = sub_total + tax_amount
         amount_in_words = num_to_words(grand_total)
         
-        # Generate Rows HTML
         rows_html = ""
         for idx, row in group.iterrows():
             u_price = f"{row['Unit Price (PKR)']:,.2f}"
@@ -429,12 +423,12 @@ def generate_html_invoice(input_df, header_info, tax_rate):
         for _ in range(max(0, 8 - len(group))):
              rows_html += '<tr class="bg-white"><td class="p-2 text-center">&nbsp;</td><td></td><td class="wrap-text"></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>'
 
-        # Dynamic Header HTML using user input
+        # --- UPDATED HEADER CSS: Removed border from header section ---
         invoice_html = f"""
-        <div class="printable-container max-w-6xl mx-auto bg-white p-6 md:p-8 rounded-lg shadow-lg border-2 border-gray-700 dark-border mb-8" style="page-break-after: always;">
+        <div class="printable-container max-w-6xl mx-auto bg-white p-6 md:p-8 rounded-lg shadow-lg border-2 border-black mb-8" style="page-break-after: always;">
             
-            <!-- Header -->
-            <header class="flex justify-between items-start pb-4 border-b-2 border-gray-700 dark-border">
+            <!-- Header (NO BORDER HERE) -->
+            <header class="flex justify-between items-start pb-4">
                 <div>
                     <h1 class="text-2xl md:text-3xl font-bold text-gray-800">{header_info['company_name']}</h1>
                     <p class="text-sm text-gray-500">{header_info['address']}</p>
@@ -446,16 +440,16 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                     <h2 class="text-2xl md:text-3xl font-semibold text-gray-700">SALES TAX INVOICE</h2>
                     <div class="mt-2 grid grid-cols-2 gap-2 text-left">
                         <label class="block text-xs font-medium text-gray-500 p-1">Invoice No.</label>
-                        <input type="text" value="{invoice_no}" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border" readonly>
+                        <input type="text" value="{invoice_no}" class="block w-full p-1 border-2 border-black rounded-md shadow-sm text-sm text-black font-medium" readonly>
                         
                         <label class="block text-xs font-medium text-gray-500 p-1">Invoice Date</label>
-                        <input type="text" value="{invoice_date}" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                        <input type="text" value="{invoice_date}" class="block w-full p-1 border-2 border-black rounded-md shadow-sm text-sm text-black font-medium">
                         
                         <label class="block text-xs font-medium text-gray-500 p-1">Payment Terms</label>
-                        <input type="text" value="{payment_terms}" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                        <input type="text" value="{payment_terms}" class="block w-full p-1 border-2 border-black rounded-md shadow-sm text-sm text-black font-medium">
 
                         <label class="block text-xs font-medium text-gray-500 p-1">Customer PO</label>
-                        <input type="text" value="PO-REF-XX" class="block w-full p-1 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                        <input type="text" value="PO-REF-XX" class="block w-full p-1 border-2 border-black rounded-md shadow-sm text-sm text-black font-medium">
                     </div>
                 </div>
             </header>
@@ -463,32 +457,32 @@ def generate_html_invoice(input_df, header_info, tax_rate):
             <div class="main-content">
                 <!-- Customer Section -->
                 <section class="grid grid-cols-2 gap-6 mt-6 section-spacing">
-                    <div class="border border-gray-700 rounded-md p-3 dark-border">
-                        <h3 class="text-sm font-semibold text-white mb-2 bg-gray-700 p-1 -m-3 border-b border-gray-700 dark-bg dark-border">BILL TO</h3>
+                    <div class="border-2 border-black rounded-md p-3">
+                        <h3 class="text-sm font-semibold text-white mb-2 bg-gray-700 p-1 -m-3 border-b border-black dark-bg print-header">BILL TO</h3>
                         <div class="mt-3">
-                            <label class="block text-xs font-medium text-gray-500">Customer Name</label>
-                            <input type="text" value="{customer_name}" class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                            <label class="block text-xs font-medium text-black font-bold">Customer Name</label>
+                            <input type="text" value="{customer_name}" class="mt-1 block w-full p-2 border-2 border-black rounded-md shadow-sm text-sm text-black dark-border font-medium">
                         </div>
                         <div class="mt-2">
-                            <label class="block text-xs font-medium text-gray-500">Address</label>
-                            <textarea class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border" rows="2">{bill_address}</textarea>
+                            <label class="block text-xs font-medium text-black font-bold">Address</label>
+                            <textarea class="mt-1 block w-full p-2 border-2 border-black rounded-md shadow-sm text-sm text-black dark-border font-medium" rows="2">{bill_address}</textarea>
                         </div>
                         <div class="mt-2 grid grid-cols-2 gap-2">
                              <div>
-                                <label class="block text-xs font-medium text-gray-500">NTN</label>
-                                <input type="text" value="{customer_ntn}" class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                                <label class="block text-xs font-medium text-black font-bold">NTN</label>
+                                <input type="text" value="{customer_ntn}" class="mt-1 block w-full p-2 border-2 border-black rounded-md shadow-sm text-sm text-black dark-border font-medium">
                              </div>
                              <div>
-                                <label class="block text-xs font-medium text-gray-500">STRN</label>
-                                <input type="text" value="" class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border">
+                                <label class="block text-xs font-medium text-black font-bold">STRN</label>
+                                <input type="text" value="" class="mt-1 block w-full p-2 border-2 border-black rounded-md shadow-sm text-sm text-black dark-border font-medium">
                              </div>
                         </div>
                     </div>
-                    <div class="border border-gray-700 rounded-md p-3 dark-border">
-                        <h3 class="text-sm font-semibold text-white mb-2 bg-gray-700 p-1 -m-3 border-b border-gray-700 dark-bg dark-border">SHIP TO</h3>
+                    <div class="border-2 border-black rounded-md p-3">
+                        <h3 class="text-sm font-semibold text-white mb-2 bg-gray-700 p-1 -m-3 border-b border-black dark-bg print-header">SHIP TO</h3>
                         <div class="mt-3">
-                            <p class="text-sm font-semibold text-gray-800">{customer_name}</p>
-                            <p class="text-sm text-gray-600">{bill_address}</p>
+                            <p class="text-sm font-semibold text-black">{customer_name}</p>
+                            <p class="text-sm text-black">{bill_address}</p>
                         </div>
                     </div>
                 </section>
@@ -497,7 +491,7 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                 <section class="mt-6 table-container section-spacing">
                     <h3 class="text-lg font-semibold text-gray-700 mb-2">Item Details</h3>
                     <table class="w-full text-sm text-left text-gray-500 printable-table">
-                        <thead class="text-xs text-white uppercase bg-gray-700 dark-bg" style="-webkit-print-color-adjust: exact;">
+                        <thead class="text-xs text-white uppercase bg-gray-700 dark-bg print-header" style="-webkit-print-color-adjust: exact;">
                             <tr>
                                 <th class="p-2 text-center" style="width: 3%;">Sr.</th>
                                 <th class="p-2" style="width: 8%;">H.S Code</th>
@@ -520,23 +514,23 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                 <!-- Totals -->
                 <section class="grid grid-cols-2 gap-6 mt-6 section-spacing">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700">Amount in Words (PKR)</label>
-                        <textarea class="mt-1 block w-full p-2 border border-gray-700 rounded-md shadow-sm text-sm dark-border" rows="2" readonly>{amount_in_words}</textarea>
+                        <label class="block text-sm font-medium text-black font-bold">Amount in Words (PKR)</label>
+                        <textarea class="mt-1 block w-full p-2 border-2 border-black rounded-md shadow-sm text-sm dark-border text-black" rows="2" readonly>{amount_in_words}</textarea>
                     </div>
                     <div class="space-y-2">
-                        <div class="flex justify-between items-center bg-gray-700 text-white p-2 rounded-md border border-gray-700 dark-bg dark-border">
-                            <span class="text-sm font-semibold">Sub-Total:</span>
-                            <span class="text-sm font-semibold">{sub_total:,.2f}</span>
+                        <div class="flex justify-between items-center bg-gray-700 text-white p-2 rounded-md border-2 border-black dark-bg print-total-box">
+                            <span class="text-sm font-bold text-white">Sub-Total:</span>
+                            <span class="text-sm font-bold text-white">{sub_total:,.2f}</span>
                         </div>
                         <div class="flex justify-between items-center p-2">
-                            <div class="text-sm font-medium text-gray-600">
+                            <div class="text-sm font-bold text-black">
                                 Sales Tax ({tax_rate}%):
                             </div>
-                            <span class="text-sm text-gray-800">{tax_amount:,.2f}</span>
+                            <span class="text-sm font-bold text-black">{tax_amount:,.2f}</span>
                         </div>
-                        <div class="flex justify-between items-center bg-gray-700 text-white p-3 rounded-md border border-gray-700 dark-bg dark-border">
-                            <span class="text-base font-bold">Grand Total:</span>
-                            <span class="text-base font-bold">{grand_total:,.2f}</span>
+                        <div class="flex justify-between items-center bg-gray-700 text-white p-3 rounded-md border-2 border-black dark-bg print-total-box">
+                            <span class="text-base font-bold text-white">Grand Total:</span>
+                            <span class="text-base font-bold text-white">{grand_total:,.2f}</span>
                         </div>
                     </div>
                 </section>
@@ -556,7 +550,6 @@ def generate_html_invoice(input_df, header_info, tax_rate):
         """
         all_invoices_html += invoice_html
 
-    # --- Final HTML Structure ---
     full_html = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -572,10 +565,39 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                 html, body {{ background-color: #fff; font-size: 9pt; }}
                 .no-print {{ display: none; }}
                 input, textarea, select {{ border: none !important; resize: none; }}
-                .printable-table th {{ background-color: #4A5568 !important; color: white !important; -webkit-print-color-adjust: exact; }}
+                
+                /* FORCE PRINT COLORS AND BACKGROUNDS */
+                .printable-table th {{ 
+                    background-color: #374151 !important; /* Dark Gray */
+                    color: #ffffff !important; /* White Text */
+                    -webkit-print-color-adjust: exact !important;
+                    print-color-adjust: exact !important; 
+                }}
+                .print-header {{
+                    background-color: #374151 !important; /* Dark Gray */
+                    color: #ffffff !important; /* White Text */
+                    -webkit-print-color-adjust: exact !important;
+                    print-color-adjust: exact !important;
+                }}
+                .print-total-box {{
+                    background-color: #374151 !important; /* Dark Gray */
+                    color: #ffffff !important; /* White Text */
+                    -webkit-print-color-adjust: exact !important;
+                    print-color-adjust: exact !important;
+                }}
+                
+                /* FORCE BLACK TEXT FOR CONTENT */
+                .text-black {{ color: #000000 !important; }}
+                .text-gray-500, .text-gray-600, .text-gray-700, .text-gray-800 {{ color: #000000 !important; }}
+                
+                /* FORCE BLACK BORDERS FOR INPUTS */
+                .border-black {{ border-color: #000000 !important; border-width: 2px !important; border-style: solid !important; }}
+                
+                /* Override Tailwind's print reset if any */
+                .border-2 {{ border-width: 2px !important; }}
             }}
             .signature-line {{ border-top: 1px solid #4A5568; margin-top: 2.5rem; }}
-            .printable-table, .printable-table th, .printable-table td {{ border: 1px solid #4A5568; border-collapse: collapse; }}
+            .printable-table, .printable-table th, .printable-table td {{ border: 1px solid #000000 !important; border-collapse: collapse; }}
         </style>
     </head>
     <body class="p-4 md:p-8">
@@ -698,8 +720,6 @@ def generate_excel_invoice(input_df, header_info, tax_rate):
             ws.cell(row=current_row, column=1, value="Amount in Words: " + num_to_words(grand_total)).font = Font(italic=True)
             
             # Page Break Logic
-            # (OpenPyXL doesn't support explicit 'insert page break' easily in one sheet flow same as HTML/PDF logic
-            # but we can simulate spacing for printing or just list them sequentially)
             current_row += 4 # Gap before next invoice
             
         # Remove default sheet
@@ -759,6 +779,14 @@ with st.sidebar:
         
     st.markdown(f"## **{BRAND_NAME}**")
     st.caption("Professional Finance Consultancy")
+    st.write("---")
+    
+    # Add Tutorial Video in Sidebar
+    st.write("**🎥 App Tutorial**")
+    if os.path.exists("Tutorial.mp4"):
+        st.video("Tutorial.mp4")
+    else:
+        st.info("Tutorial video not available.")
     st.write("---")
     
     col_about_label, col_about_img = st.columns([3, 1])
@@ -941,7 +969,7 @@ with tab2:
                     with col_d1:
                         # Offer HTML Download
                         st.download_button(
-                            label="📥 Download PDF/HTML Invoices",
+                            label="📥 Download Invoice (HTML)",
                             data=html_content,
                             file_name="GST_Invoices_Printable.html",
                             mime="text/html"
@@ -954,10 +982,6 @@ with tab2:
                             file_name="GST_Invoices.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
-                    
-                    # Show Preview
-                    st.markdown("### Preview (First Invoice)")
-                    st.components.v1.html(html_content, height=800, scrolling=True)
                     
         except Exception as e:
             st.error(f"Error processing file: {e}")
