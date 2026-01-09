@@ -1,0 +1,32 @@
+Byte-compiled / optimized / DLL files
+
+pycache/
+*.py[cod]
+*$py.class
+
+Virtual Environments (The folder you deleted earlier)
+
+.venv
+.env
+venv/
+env/
+ENV/
+
+Excel Temporary Files (Important for your tool)
+
+~$*.xlsx
+
+Distribution / Packaging
+
+dist/
+build/
+*.egg-info/
+
+Streamlit specific
+
+.streamlit/secrets.toml
+
+Mac/Windows system files
+
+.DS_Store
+Thumbs.db
