@@ -92,10 +92,6 @@ st.markdown(f"""
     </style>
     """, unsafe_allow_html=True)
 
-# --- CONSTANTS ---
-SHIFT_STRING = "(0900:1800)"
-STANDARD_HOURS_PER_DAY = 9
-
 # ==========================================
 # 2. HELPER FUNCTIONS (ALL)
 # ==========================================
@@ -116,7 +112,7 @@ def create_natural_time(year, month, base_hour, is_arrival):
         return "00:00"
 
 def distribute_overtime(required_ot, num_working_days):
-    """Distributes required OT hours randomly."""
+    """Distributes required OT hours randomly among allowed working days."""
     if num_working_days == 0:
         return []
         
@@ -150,7 +146,7 @@ def distribute_overtime(required_ot, num_working_days):
             
     return ot_hours_list
 
-def generate_attendance_file(input_df, target_month, target_year, holidays_dict, company_name_input):
+def generate_attendance_file(input_df, target_month, target_year, holidays_dict, company_name_input, std_shift, sp_shift=None):
     output = io.BytesIO()
     month_year_str = f"{datetime.date(target_year, target_month, 1).strftime('%B %Y').upper()}"
 
@@ -164,6 +160,11 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
     thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
     index_data = []
+
+    def is_special(date_obj):
+        """Checks if a given date falls within the special shift date range."""
+        if not sp_shift: return False
+        return sp_shift["start"] <= date_obj <= sp_shift["end"]
 
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         index_ws = writer.book.create_sheet(title="Index", index=0)
@@ -234,10 +235,16 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
                 "OT Hours": req_ot
             })
             
+            # Divide working days into standard and special
             working_days_with_attendance = [day for day in working_days_in_month if day not in absent_days]
-            ot_schedule = distribute_overtime(req_ot, len(working_days_with_attendance))
+            standard_working_days = [day for day in working_days_with_attendance if not is_special(day)]
             
-            work_day_counter = 0
+            # Distribute OT *only* among standard working days
+            ot_schedule = distribute_overtime(req_ot, len(standard_working_days))
+            
+            std_work_counter = 0
+            sp_work_counter = 0
+            total_std_hours = 0
             
             for day_num in range(1, num_days_in_month + 1):
                 current_date = datetime.date(target_year, target_month, day_num)
@@ -245,29 +252,45 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
                 is_sunday = current_date.weekday() == 6
                 holiday_name = holidays_dict.get(current_date)
                 
-                row = [date_str, SHIFT_STRING, "", "", "", ""]
+                row = [date_str, std_shift['name'], "", "", "", ""]
                 
                 if is_sunday:
                     row[5] = "SUNDAY"
                 elif holiday_name:
                     row[5] = holiday_name
                 elif current_date in working_days_with_attendance:
-                    ot_hours = ot_schedule[work_day_counter]
-                    row[2] = create_natural_time(target_year, target_month, 9, True)
-                    row[3] = create_natural_time(target_year, target_month, 18 + ot_hours, False)
-                    row[4] = ot_hours if ot_hours > 0 else ""
-                    row[5] = "On Time"
-                    work_day_counter += 1
+                    if is_special(current_date):
+                        # Special Shift Day Logic
+                        row[1] = sp_shift['name']
+                        row[2] = create_natural_time(target_year, target_month, 9, True)
+                        row[3] = create_natural_time(target_year, target_month, sp_shift['out_hour'], False)
+                        row[4] = "" # NO OT FOR SPECIAL SHIFT
+                        row[5] = "On Time"
+                        total_std_hours += sp_shift['hours']
+                        sp_work_counter += 1
+                    else:
+                        # Standard Shift Day Logic
+                        ot_hours = ot_schedule[std_work_counter]
+                        row[1] = std_shift['name']
+                        row[2] = create_natural_time(target_year, target_month, 9, True)
+                        row[3] = create_natural_time(target_year, target_month, std_shift['out_hour'] + ot_hours, False)
+                        row[4] = ot_hours if ot_hours > 0 else ""
+                        row[5] = "On Time"
+                        total_std_hours += std_shift['hours']
+                        std_work_counter += 1
                 elif current_date in working_days_in_month:
                     row[5] = "Absent"
                 
                 full_month_data.append(row)
                 
             # Footing Logic
-            total_present_days = work_day_counter 
-            total_std_hours = (work_day_counter) * STANDARD_HOURS_PER_DAY
+            total_present_days = std_work_counter + sp_work_counter
             total_ot_hours = sum(ot_schedule)
             total_payable_hours = total_std_hours + total_ot_hours
+            
+            shift_breakdown_str = f"({std_work_counter} Std. Days x {std_shift['hours']}h)"
+            if sp_work_counter > 0:
+                shift_breakdown_str += f" + ({sp_work_counter} Spc. Days x {sp_shift['hours']}h)"
             
             footing_data = [
                 ["SUMMARY:", ""],
@@ -278,7 +301,7 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
                 ["Absent", num_absent],
                 ["Over Time Hrs.", total_ot_hours],
                 [],
-                ["Total Standard Hours", total_std_hours, f"({work_day_counter} Days x {STANDARD_HOURS_PER_DAY} Hrs)"],
+                ["Total Standard Hours", total_std_hours, shift_breakdown_str],
                 ["Total OT Hours", total_ot_hours, f"(Sum of OT HRS)"],
                 ["Total Payable Hours", total_payable_hours]
             ]
@@ -365,7 +388,6 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
 
 # --- B. INVOICE HELPERS ---
 def num_to_words(n):
-    """Converts a number to words (Western System) for invoice amount."""
     ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen']
     tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety']
 
@@ -387,11 +409,8 @@ def num_to_words(n):
     return words + " Only"
 
 def generate_html_invoice(input_df, header_info, tax_rate):
-    """Generates a printable HTML string using dynamic header info."""
     grouped = input_df.groupby('DC No.')
     all_invoices_html = ""
-    
-    # NOTE: Logo removed from Invoice as per user request.
     
     for dc_no, group in grouped:
         header_row = group.iloc[0]
@@ -438,8 +457,6 @@ def generate_html_invoice(input_df, header_info, tax_rate):
 
         invoice_html = f"""
         <div class="printable-container max-w-6xl mx-auto bg-white p-6 md:p-8 mb-8" style="page-break-after: always;">
-            
-            <!-- Header - NO BORDER -->
             <header class="flex justify-between items-start pb-4">
                 <div>
                     <h1 class="text-2xl md:text-3xl font-bold text-gray-800">{header_info['company_name']}</h1>
@@ -467,7 +484,6 @@ def generate_html_invoice(input_df, header_info, tax_rate):
             </header>
 
             <div class="main-content">
-                <!-- Customer Section -->
                 <section class="grid grid-cols-2 gap-6 mt-6 section-spacing">
                     <div class="border-2 border-black rounded-md p-3">
                         <h3 class="text-sm font-semibold text-white mb-2 bg-gray-700 p-1 -m-3 border-b border-black dark-bg print-header">BILL TO</h3>
@@ -499,7 +515,6 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                     </div>
                 </section>
     
-                <!-- Items Table -->
                 <section class="mt-6 table-container section-spacing">
                     <h3 class="text-lg font-semibold text-gray-700 mb-2">Item Details</h3>
                     <table class="w-full text-sm text-left text-gray-500 printable-table">
@@ -523,7 +538,6 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                     </table>
                 </section>
                 
-                <!-- Totals -->
                 <section class="grid grid-cols-2 gap-6 mt-6 section-spacing">
                     <div>
                         <label class="block text-sm font-medium text-black font-bold">Amount in Words (PKR)</label>
@@ -548,7 +562,6 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                 </section>
             </div>
 
-            <!-- Footer Signature -->
             <footer class="mt-8">
                 <div class="grid grid-cols-2 gap-8">
                     <div></div>
@@ -577,35 +590,12 @@ def generate_html_invoice(input_df, header_info, tax_rate):
                 html, body {{ background-color: #fff; font-size: 9pt; }}
                 .no-print {{ display: none; }}
                 input, textarea, select {{ border: none !important; resize: none; }}
-                
-                /* FORCE PRINT COLORS AND BACKGROUNDS */
-                .printable-table th {{ 
-                    background-color: #374151 !important; /* Dark Gray */
-                    color: #ffffff !important; /* White Text */
-                    -webkit-print-color-adjust: exact !important;
-                    print-color-adjust: exact !important; 
-                }}
-                .print-header {{
-                    background-color: #374151 !important; /* Dark Gray */
-                    color: #ffffff !important; /* White Text */
-                    -webkit-print-color-adjust: exact !important;
-                    print-color-adjust: exact !important;
-                }}
-                .print-total-box {{
-                    background-color: #374151 !important; /* Dark Gray */
-                    color: #ffffff !important; /* White Text */
-                    -webkit-print-color-adjust: exact !important;
-                    print-color-adjust: exact !important;
-                }}
-                
-                /* FORCE BLACK TEXT FOR CONTENT */
+                .printable-table th {{ background-color: #374151 !important; color: #ffffff !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+                .print-header {{ background-color: #374151 !important; color: #ffffff !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+                .print-total-box {{ background-color: #374151 !important; color: #ffffff !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
                 .text-black {{ color: #000000 !important; }}
                 .text-gray-500, .text-gray-600, .text-gray-700, .text-gray-800 {{ color: #000000 !important; }}
-                
-                /* FORCE BLACK BORDERS FOR INPUTS */
                 .border-black {{ border-color: #000000 !important; border-width: 2px !important; border-style: solid !important; }}
-                
-                /* Override Tailwind's print reset if any */
                 .border-2 {{ border-width: 2px !important; }}
             }}
             .signature-line {{ border-top: 1px solid #4A5568; margin-top: 2.5rem; }}
@@ -625,10 +615,8 @@ def generate_html_invoice(input_df, header_info, tax_rate):
     return full_html
 
 def generate_excel_invoice(input_df, header_info, tax_rate):
-    """Generates an Excel file with multiple invoices on one sheet separated by page breaks."""
     output = io.BytesIO()
     grouped = input_df.groupby('DC No.')
-    
     header_font = Font(name='Calibri', size=14, bold=True)
     sub_header_font = Font(name='Calibri', size=10)
     table_header_font = Font(name='Calibri', size=10, bold=True, color="FFFFFF")
@@ -649,7 +637,6 @@ def generate_excel_invoice(input_df, header_info, tax_rate):
         ws.column_dimensions['J'].width = 15
         
         current_row = 1
-        
         for dc_no, group in grouped:
             header_row = group.iloc[0]
             invoice_no = header_row.get('Invoice No.', '')
@@ -659,15 +646,12 @@ def generate_excel_invoice(input_df, header_info, tax_rate):
             ws.cell(row=current_row, column=1, value=header_info['company_name']).font = header_font
             ws.cell(row=current_row, column=8, value="SALES TAX INVOICE").font = header_font
             current_row += 1
-            
             ws.cell(row=current_row, column=1, value=header_info['address']).font = sub_header_font
             ws.cell(row=current_row, column=8, value=f"Invoice No: {invoice_no}").font = sub_header_font
             current_row += 1
-            
             ws.cell(row=current_row, column=1, value=f"Phone: {header_info['phone']}").font = sub_header_font
             ws.cell(row=current_row, column=8, value=f"Date: {invoice_date}").font = sub_header_font
             current_row += 1
-            
             ws.cell(row=current_row, column=1, value=f"NTN: {header_info['ntn']}").font = sub_header_font
             current_row += 2 
             
@@ -720,12 +704,10 @@ def generate_excel_invoice(input_df, header_info, tax_rate):
             
             current_row += 1
             ws.cell(row=current_row, column=1, value="Amount in Words: " + num_to_words(grand_total)).font = Font(italic=True)
-            
             current_row += 4
             
         if 'Sheet' in writer.book.sheetnames:
             writer.book.remove(writer.book['Sheet'])
-            
     return output
 
 # --- C. BANK CONVERTER HELPERS ---
@@ -842,12 +824,8 @@ def generate_bank_excel(df):
         worksheet = writer.sheets['Extracted Data']
         
         header_fmt = workbook.add_format({
-            'bold': True, 
-            'font_color': 'white', 
-            'bg_color': '#003366', 
-            'border': 1, 
-            'align': 'center',
-            'valign': 'vcenter'
+            'bold': True, 'font_color': 'white', 'bg_color': '#003366', 
+            'border': 1, 'align': 'center', 'valign': 'vcenter'
         })
         num_fmt = workbook.add_format({'num_format': '#,##0.00', 'border': 1, 'valign': 'top', 'font_name': 'Arial', 'font_size': 10})
         date_fmt = workbook.add_format({'num_format': 'dd/mm/yyyy', 'align': 'center', 'border': 1, 'valign': 'top', 'font_name': 'Arial', 'font_size': 10})
@@ -881,9 +859,7 @@ def generate_bank_excel(df):
     return output.getvalue()
 
 # --- D. TAX CALCULATION HELPER ---
-# MOVED HERE TO PREVENT NAME_ERROR
 def calculate_fbr_tax(monthly_gross_salary):
-    """Calculates Pakistan FBR Income Tax (Salaried) for Tax Year 2025-2026."""
     annual_income = monthly_gross_salary * 12
     annual_tax = 0
 
@@ -964,7 +940,6 @@ with col_title:
 
 with col_logo:
     try:
-        # LOGO IS ONLY HERE, NOT ON INVOICE
         header_logo = PILImage.open("logo.jpg")
         st.image(header_logo, width=100) 
     except:
@@ -993,14 +968,14 @@ with tab1:
         col_gen_1, col_gen_2 = st.columns(2)
         with col_gen_1:
             company_name = st.text_input("Company Name", value="ABC COMPANY", key="att_company_name")
-            target_date = st.date_input("Select Month & Year", datetime.date(2025, 8, 1), key="att_target_date")
+            target_date = st.date_input("Select Month & Year", datetime.date(2026, 2, 1), key="att_target_date")
             selected_month = target_date.month
             selected_year = target_date.year
         
         with col_gen_2:
             st.write("**Gazetted Holidays**")
             if 'holidays' not in st.session_state:
-                st.session_state.holidays = [{"date": datetime.date(selected_year, 8, 14), "name": "Independence Day"}]
+                st.session_state.holidays = []
             
             col_h1, col_h2 = st.columns(2)
             with col_h1:
@@ -1040,6 +1015,40 @@ with tab1:
             else:
                 st.caption("No holidays for this month.")
 
+    # NEW: SHIFT & OVERTIME SETTINGS EXPANDER
+    with st.expander("⏱️ Shift & Overtime Settings (Standard & Special)", expanded=False):
+        st.write("**Standard Working Days Settings**")
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1: std_shift_name = st.text_input("Standard Shift Name", "(0900:1800)")
+        with col_s2: std_hours = st.number_input("Standard Hours/Day", value=9, min_value=1)
+        with col_s3: std_out_hour = st.number_input("Standard Checkout Hour (24h)", value=18, min_value=1, max_value=23)
+        
+        std_shift_config = {"name": std_shift_name, "hours": std_hours, "out_hour": std_out_hour}
+
+        st.write("---")
+        use_special_shift = st.checkbox("✅ Apply Special Shift (e.g., Ramadan Timings)", value=False)
+        special_shift_config = None
+        
+        if use_special_shift:
+            st.info("During these dates, Overtime will NOT be calculated. OT will only be distributed among Standard days.")
+            col_sp1, col_sp2 = st.columns(2)
+            with col_sp1:
+                # Setup default for Feb 19 - Feb 28 as requested
+                sp_start = st.date_input("Special Shift Start Date", datetime.date(selected_year, selected_month, 19) if selected_month == 2 else datetime.date(selected_year, selected_month, 1))
+                sp_end = st.date_input("Special Shift End Date", datetime.date(selected_year, selected_month, 28) if selected_month == 2 else datetime.date(selected_year, selected_month, 15))
+            with col_sp2:
+                sp_shift_name = st.text_input("Special Shift Name", "(0900:1600)")
+                sp_hours = st.number_input("Special Hours/Day", value=7, min_value=1)
+                sp_out_hour = st.number_input("Special Checkout Hour (24h)", value=16, min_value=1, max_value=23)
+
+            special_shift_config = {
+                "start": sp_start,
+                "end": sp_end,
+                "name": sp_shift_name,
+                "hours": sp_hours,
+                "out_hour": sp_out_hour
+            }
+
     uploaded_file = st.file_uploader("Upload Input File", type=['xlsx'])
 
     if uploaded_file is not None:
@@ -1051,7 +1060,7 @@ with tab1:
                 
             if st.button("🚀 Generate & Download Report", type="primary"):
                 with st.spinner("Processing data..."):
-                    excel_data = generate_attendance_file(df, selected_month, selected_year, holidays_dict, company_name)
+                    excel_data = generate_attendance_file(df, selected_month, selected_year, holidays_dict, company_name, std_shift_config, special_shift_config)
                     st.success("Done! Your file is ready.")
                     file_name = f"NFP_Attendance_{target_date.strftime('%B_%Y')}.xlsx"
                     st.download_button(
