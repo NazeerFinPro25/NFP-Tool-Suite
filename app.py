@@ -165,6 +165,13 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
         """Checks if a given date falls within the special shift date range."""
         if not sp_shift: return False
         return sp_shift["start"] <= date_obj <= sp_shift["end"]
+        
+    def get_val(row_s, *keys, default=None):
+        """Safely fetch a value from the pandas row checking multiple possible column names (Case-Insensitive)."""
+        for k in keys:
+            if k in row_s:
+                return row_s[k]
+        return default
 
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         index_ws = writer.book.create_sheet(title="Index", index=0)
@@ -175,15 +182,30 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
         for i, (_, employee) in enumerate(input_df.iterrows()):
             progress_bar.progress((i + 1) / total_emps)
 
-            emp_code = employee['CODE']
-            emp_name = employee['NAME']
-            req_ot = int(employee['Overtime Hours'])
-            s_no = employee['S#']
+            # --- Robust Data Extraction (Case Insensitive Support) ---
+            emp_code = get_val(employee, 'CODE', 'Code', 'code', default='')
+            emp_name = get_val(employee, 'NAME', 'Name', 'name', default='')
+            s_no = get_val(employee, 'S#', 'S.No', 'S. No', 's#', default='')
             
+            req_ot_raw = get_val(employee, 'Overtime Hours', 'OVERTIME HOURS', 'Overtime', default=0)
+            req_ot = int(req_ot_raw) if pd.notna(req_ot_raw) and str(req_ot_raw).strip() != '' else 0
+            
+            abs_raw = get_val(employee, 'ABSENT DAYS', 'Absent Days', 'Absent', default=0)
             try:
-                num_absent = int(employee['ABSENT DAYS']) if pd.notna(employee['ABSENT DAYS']) else 0
+                num_absent = int(abs_raw) if pd.notna(abs_raw) and str(abs_raw).strip() != '' else 0
             except ValueError:
                 num_absent = 0
+            
+            # Extract Status (Handling New and Left Employees dynamically)
+            emp_status_raw = get_val(employee, 'STATUS', 'Status', 'status', default='')
+            if pd.isna(emp_status_raw) or str(emp_status_raw).strip().lower() in ['nan', '']:
+                emp_status = ""
+            else:
+                emp_status = str(emp_status_raw).strip().title()
+                
+            # Extract Date
+            emp_date_raw = get_val(employee, 'DATE', 'Date', 'date', default=pd.NaT)
+            # ---------------------------------------------------------
                 
             safe_name = str(emp_name).replace(":", "").replace("/", "")
             sheet_name = f"{emp_code}_{safe_name}"[:31]
@@ -203,6 +225,21 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
                 num_days_in_month = last_day_of_month.day
             except ValueError:
                 num_days_in_month = 30
+                last_day_of_month = datetime.date(target_year, target_month, 30)
+
+            # --- Determine Active Period bounds based on Joining/Leaving status ---
+            active_start_date = datetime.date(target_year, target_month, 1)
+            active_end_date = last_day_of_month
+
+            if pd.notna(emp_date_raw) and str(emp_date_raw).strip() != "":
+                try:
+                    parsed_date = pd.to_datetime(emp_date_raw).date()
+                    if emp_status == "New":
+                        active_start_date = max(active_start_date, parsed_date)
+                    elif emp_status == "Left":
+                        active_end_date = min(active_end_date, parsed_date)
+                except Exception:
+                    pass # Ignore if date format is strictly invalid
                 
             working_days_in_month = []
             full_month_data = []
@@ -211,28 +248,35 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
             
             for day_num in range(1, num_days_in_month + 1):
                 current_date = datetime.date(target_year, target_month, day_num)
-                is_sunday = current_date.weekday() == 6
-                is_holiday = current_date in holidays_dict
                 
-                if is_sunday:
-                    sundays += 1
-                elif is_holiday:
-                    holidays_found += 1
-                else:
-                    working_days_in_month.append(current_date)
+                # Only check holidays and sundays if the employee is currently active
+                if active_start_date <= current_date <= active_end_date:
+                    is_sunday = current_date.weekday() == 6
+                    is_holiday = current_date in holidays_dict
+                    
+                    if is_sunday:
+                        sundays += 1
+                    elif is_holiday:
+                        holidays_found += 1
+                    else:
+                        working_days_in_month.append(current_date)
             
             num_working_days = len(working_days_in_month)
             absent_days = set()
-            if num_absent > 0 and num_absent <= num_working_days:
-                absent_days = set(random.sample(working_days_in_month, num_absent))
+            
+            # Make sure we don't assign more absent days than the employee actually worked
+            actual_absent = min(num_absent, num_working_days) 
+            if actual_absent > 0:
+                absent_days = set(random.sample(working_days_in_month, actual_absent))
                 
             index_data.append({
                 "S. No": s_no,
                 "CODE": emp_code,
                 "Name": emp_name,
                 "SheetName": sheet_name,
-                "Absent": num_absent,
-                "OT Hours": req_ot
+                "Absent": actual_absent,
+                "OT Hours": req_ot,
+                "Status": emp_status
             })
             
             # Divide working days into standard and special
@@ -249,37 +293,46 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
             for day_num in range(1, num_days_in_month + 1):
                 current_date = datetime.date(target_year, target_month, day_num)
                 date_str = current_date.strftime("%d-%b-%y")
-                is_sunday = current_date.weekday() == 6
-                holiday_name = holidays_dict.get(current_date)
                 
                 row = [date_str, std_shift['name'], "", "", "", ""]
-                
-                if is_sunday:
-                    row[5] = "SUNDAY"
-                elif holiday_name:
-                    row[5] = holiday_name
-                elif current_date in working_days_with_attendance:
-                    if is_special(current_date):
-                        # Special Shift Day Logic
-                        row[1] = sp_shift['name']
-                        row[2] = create_natural_time(target_year, target_month, 9, True)
-                        row[3] = create_natural_time(target_year, target_month, sp_shift['out_hour'], False)
-                        row[4] = "" # NO OT FOR SPECIAL SHIFT
-                        row[5] = "On Time"
-                        total_std_hours += sp_shift['hours']
-                        sp_work_counter += 1
-                    else:
-                        # Standard Shift Day Logic
-                        ot_hours = ot_schedule[std_work_counter]
-                        row[1] = std_shift['name']
-                        row[2] = create_natural_time(target_year, target_month, 9, True)
-                        row[3] = create_natural_time(target_year, target_month, std_shift['out_hour'] + ot_hours, False)
-                        row[4] = ot_hours if ot_hours > 0 else ""
-                        row[5] = "On Time"
-                        total_std_hours += std_shift['hours']
-                        std_work_counter += 1
-                elif current_date in working_days_in_month:
-                    row[5] = "Absent"
+
+                # Process dates before joining or after leaving first
+                if current_date < active_start_date:
+                    row[1] = "-"
+                    row[5] = "Not Joined"
+                elif current_date > active_end_date:
+                    row[1] = "-"
+                    row[5] = "Left"
+                else:
+                    is_sunday = current_date.weekday() == 6
+                    holiday_name = holidays_dict.get(current_date)
+                    
+                    if is_sunday:
+                        row[5] = "SUNDAY"
+                    elif holiday_name:
+                        row[5] = holiday_name
+                    elif current_date in working_days_with_attendance:
+                        if is_special(current_date):
+                            # Special Shift Day Logic
+                            row[1] = sp_shift['name']
+                            row[2] = create_natural_time(target_year, target_month, 9, True)
+                            row[3] = create_natural_time(target_year, target_month, sp_shift['out_hour'], False)
+                            row[4] = "" # NO OT FOR SPECIAL SHIFT
+                            row[5] = "On Time"
+                            total_std_hours += sp_shift['hours']
+                            sp_work_counter += 1
+                        else:
+                            # Standard Shift Day Logic
+                            ot_hours = ot_schedule[std_work_counter]
+                            row[1] = std_shift['name']
+                            row[2] = create_natural_time(target_year, target_month, 9, True)
+                            row[3] = create_natural_time(target_year, target_month, std_shift['out_hour'] + ot_hours, False)
+                            row[4] = ot_hours if ot_hours > 0 else ""
+                            row[5] = "On Time"
+                            total_std_hours += std_shift['hours']
+                            std_work_counter += 1
+                    elif current_date in working_days_in_month:
+                        row[5] = "Absent"
                 
                 full_month_data.append(row)
                 
@@ -295,10 +348,10 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
             footing_data = [
                 ["SUMMARY:", ""],
                 ["Total Days in Month", num_days_in_month],
-                ["Sundays", sundays],
-                ["Gazetted Holidays", holidays_found],
+                ["Sundays (Active)", sundays],
+                ["Gazetted Holidays (Active)", holidays_found],
                 ["Total Present Days", total_present_days],
-                ["Absent", num_absent],
+                ["Absent", actual_absent],
                 ["Over Time Hrs.", total_ot_hours],
                 [],
                 ["Total Standard Hours", total_std_hours, shift_breakdown_str],
@@ -361,7 +414,7 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
             ws.page_setup.fitToHeight = 1
 
         # --- Index Sheet Logic ---
-        index_headers = ["S. No", "CODE", "Name", "Absent", "OT Hours"]
+        index_headers = ["S. No", "CODE", "Name", "Absent", "OT Hours", "Status"]
         for c_idx, val in enumerate(index_headers, 1):
             cell = index_ws.cell(row=1, column=c_idx, value=val)
             cell.font = header_font
@@ -380,6 +433,8 @@ def generate_attendance_file(input_df, target_month, target_year, holidays_dict,
             c4.font = normal_font; c4.border = thin_border; c4.alignment = center_align
             c5 = index_ws.cell(row=r_idx, column=5, value=data['OT Hours'])
             c5.font = normal_font; c5.border = thin_border; c5.alignment = center_align
+            c6 = index_ws.cell(row=r_idx, column=6, value=data['Status'])
+            c6.font = normal_font; c6.border = thin_border; c6.alignment = center_align
             
         if 'Sheet' in writer.book.sheetnames:
             writer.book.remove(writer.book['Sheet'])
